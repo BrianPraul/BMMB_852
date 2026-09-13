@@ -2,10 +2,10 @@
 
 NOT DONE YET
 
-For this week's assignment, I used the repository of STUDENT NAME, which can be found at:
+For this week's assignment, I used the repository of Emily Snyder, which can be found at:
 
 ```
-Link to repository
+[Link to repository](https://github.com/EXS5825/appbio-2026)
 ```
 After forking the repository, I checked the makefile in Visual Studio Code's agent (I used Claude) to make sure it wasn't risky (it of course wasn't). The only issue I encountered was when I tried to run the makefile. The provided command to run it was:
 
@@ -35,6 +35,10 @@ unzip -p GCA_000441915.1.zip "ncbi_dataset/data/GCA_000441915.1/*.fna" > GCA_000
 unzip -p GCA_000441915.1.zip ncbi_dataset/data/GCA_000441915.1/genomic.gff > GCA_000441915.1_genomic.gff``
 
 This is the output in the readme as well, showing it does what the readme says it does.
+#
+After feeding both makefiles into the VS Code AI, it listed strengths and weaknesses for each without taking a side. When pressed to pick one, the AI said that Emily's was better for this application because the single accession to be pulled was coded into the makefile itself, while mine requires specifying the accession in the command to run it.
+
+
 
 
 
