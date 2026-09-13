@@ -23,6 +23,7 @@ This downloads a _Salmonella enterica_ assembly.
 #
 2) **How large is the genome? How many chromosomes does it have?**
 
+The command to find this is `seqkit stats GCF_060595115.1.fasta`.</br>
 The genome is approximately 5 Mb long, with one chromosome 4.857 Mb long and one 93 Kb plasmid.
 #
 
