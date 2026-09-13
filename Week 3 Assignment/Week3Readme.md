@@ -1,12 +1,10 @@
 # Week 3 Assignment: Collaboration
 
-NOT DONE YET
-
 For this week's assignment, I used the repository of Emily Snyder, which can be found at:
 
-```
+
 [Link to repository](https://github.com/EXS5825/appbio-2026)
-```
+
 After forking the repository, I checked the makefile in Visual Studio Code's agent (I used Claude) to make sure it wasn't risky (it of course wasn't). The only issue I encountered was when I tried to run the makefile. The provided command to run it was:
 
 ```
@@ -38,10 +36,6 @@ This is the output in the readme as well, showing it does what the readme says i
 #
 After feeding both makefiles into the VS Code AI, it listed strengths and weaknesses for each without taking a side. When pressed to pick one, the AI said that Emily's was better for this application because the single accession to be pulled was coded into the makefile itself, while mine requires specifying the accession in the command to run it.
 
+The link to my pull request can be found below, and it just changes the instructions for running the makefile.
 
-
-
-
-
-
-Placeholder text here to make the folder for Week 3's assignment.
+[Link to pull request](https://github.com/EXS5825/appbio-2026/pull/1)
