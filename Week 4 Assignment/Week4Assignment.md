@@ -1,6 +1,6 @@
 # Week 4 Assignment
 
-For this week's assignment, I had to pick a different accession for *Salmonella enterica* because the one I had initially picked did not have any SRA data. My new accession is also a *S. enterica* genome, BioProject number PRJDB42458.
+For this week's assignment, I had to pick a different accession for *Salmonella enterica* because the assembly I had initially picked was a Refseq sequence without any attached SRA/SRR data. My new accession is also a *S. enterica* genome, BioProject number PRJDB42458.
 ##
 
 1. How "popular" is this genome? How many datasets are available?
