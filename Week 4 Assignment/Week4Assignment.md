@@ -1,6 +1,6 @@
 # Week 4 Assignment
 
-For this week's assignment, I had to pick a different accession for *Salmonella enterica* because the one I had initially picked did not have any SRA data. My new accession is also a *S. enterica* genome.
+For this week's assignment, I had to pick a different accession for *Salmonella enterica* because the one I had initially picked did not have any SRA data. My new accession is also a *S. enterica* genome, BioProject number PRJDB42458.
 ##
 
 1. How "popular" is this genome? How many datasets are available?
@@ -23,7 +23,7 @@ For this week's assignment, I had to pick a different accession for *Salmonella 
    Makefile usage, with the specific DRR accession and read count I used (replace with your own N and accession as needed):
 
    ```
-   make -f SRRDownloadMakefile ACCESSION=DRR1060913 N=1000
+   make -f SRRDownloadMakefile ACCESSION=DRR1060913 N=100000
    ```
 ##
 
