@@ -1,0 +1,44 @@
+SHELL := /bin/sh
+
+.DEFAULT_GOAL := download
+
+ACCESSION ?=
+N ?=
+OUTDIR ?= fastq
+
+.PHONY: download help clean
+
+download:
+	@set -eu; \
+	if [ -z "$(ACCESSION)" ]; then \
+		echo "Error: ACCESSION is required."; \
+		echo "Usage: make -f SRRDownloadMakefile download ACCESSION=DRR1060913 N=1000"; \
+		exit 1; \
+	fi; \
+	case "$(N)" in \
+		''|*[!0-9]*|0) \
+			echo "Error: N must be a positive integer."; \
+			exit 1; \
+			;; \
+	esac; \
+	command -v fastq-dump >/dev/null 2>&1 || { \
+		echo "Error: fastq-dump was not found."; \
+		echo "Install the NCBI SRA Toolkit first."; \
+		exit 1; \
+	}; \
+	mkdir -p "$(OUTDIR)"; \
+	fastq-dump -X "$(N)" \
+		--outdir "$(OUTDIR)" \
+		--split-files \
+		"$(ACCESSION)"
+
+help:
+	@echo "Download the first N reads from an SRA accession:"
+	@echo
+	@echo "  make -f SRRDownloadMakefile download ACCESSION=DRR1060913 N=1000"
+	@echo
+	@echo "Optional variable:"
+	@echo "  OUTDIR=fastq    Output directory (default: fastq)"
+
+clean:
+	rm -rf "$(OUTDIR)"
