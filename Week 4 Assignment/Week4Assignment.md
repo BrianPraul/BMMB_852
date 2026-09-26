@@ -1,21 +1,34 @@
 # Week 4 Assignment
 
-For this week's assignment, I had to pick a different accession for *Salmonella enterica* because the assembly I had initially picked was a Refseq sequence without any attached SRA/SRR data. My new accession is also a *S. enterica* genome, BioProject number PRJDB42458.
+EDIT: In an earlier version, I said there were 289 SRA datasets available. I mistakenly thought the question and subsequent ones were referring to the datasets under a specific BioProject Number. It has since been fixed.
+
+I picked the *Salmonella enterica* genome.
 ##
 
 1. How "popular" is this genome? How many datasets are available?
 
-   There are 289 SRA datasets available.
+   There are 929,885 SRA datasets available.
 ##
 
 2. What is the breakdown by sequencing strategy and platform (or some other attribute)?
 
-   212 SRA datasets were sequenced using the Illumina Novaseq, while the remaining 77 were sequenced with the Oxford Nanopore MinION.
+   ```
+   ABI SOLiD(100)
+   BGISEQ(924)
+   Capillary(128)
+   Complete Genomics(66)
+   Helicos(2)
+   Illumina(926,009)
+   Ion Torrent(1,318)
+   LS454(683)
+   Oxford Nanopore(6,068)
+   PacBio SMRT(1,615)
+   ```
 ##
 
 4. What do you find interesting or surprising?
 
-   I thought the variation in sequencing methods surprising; I would have expected them to use only one strategy for all SRA experiments.
+   I thought it was interesting that the vast, vast majority of sequencing is still done with Illumina, despite the variety in the total number of methods used.
 ##
 
 5. The Makefile
