@@ -1,0 +1,122 @@
+SHELL := /bin/bash
+# Use bash instead of the default /bin/sh so recipes can rely on bash features
+# (e.g. `set -eu`, `[ ]` semantics you're used to).
+
+REFERENCE ?=
+# Path to the reference FASTA. `?=` means it's only set here if not already
+# set on the command line or in the environment — this is the main required input.
+FASTQ_DIR ?= fastq
+# Directory to look for input FASTQ files, default "fastq".
+OUTDIR ?= bam
+# Directory where output BAMs/BAIs will be written, default "bam".
+THREADS ?= 4
+# Number of threads passed to bwa mem and samtools sort.
+
+SAMPLES ?= $(notdir $(patsubst %_1.fastq,%,$(wildcard $(FASTQ_DIR)/*_1.fastq)))
+# Auto-discover sample names:
+#   $(wildcard ...)      -> list all FASTQ_DIR/*_1.fastq files
+#   $(patsubst %_1.fastq,%,...) -> strip the "_1.fastq" suffix, leaving full paths+sample name
+#   $(notdir ...)        -> strip directory path, leaving just the sample basenames
+# Can be overridden manually: SAMPLES="sample1 sample2"
+
+BAMS := $(addprefix $(OUTDIR)/,$(addsuffix .bam,$(SAMPLES)))
+# Build the list of expected output BAM paths, e.g. bam/sample1.bam bam/sample2.bam
+BAIS := $(addsuffix .bai,$(BAMS))
+# Append .bai to each BAM path, e.g. bam/sample1.bam.bai
+# (Note: the actual index recipe below outputs $(OUTDIR)/%.bam.bai, which matches this.)
+
+.DEFAULT_GOAL := all
+# Running `make` with no target runs "all".
+.PHONY: all check-inputs reference-index help clean
+# These targets don't correspond to real files, so always run their recipes
+# when invoked rather than being skipped due to a same-named file existing.
+.PRECIOUS: $(BAMS)
+# Prevent make from deleting intermediate BAM files if a later step in the
+# chain fails or is interrupted (normally make treats them as disposable
+# intermediates and cleans them up).
+
+all: check-inputs $(BAIS)
+# Default target: validate inputs, then build every sample's .bai
+# (building the .bai also builds its prerequisite .bam via the bam rule).
+
+check-inputs:
+	@set -eu; \
+	if [ -z "$(strip $(REFERENCE))" ]; then \
+		echo "Error: REFERENCE is required."; \
+		echo "Example: make -f AlignMakefile REFERENCE=reference/genome.fa"; \
+		exit 1; \
+	fi; \
+	if [ -z "$(strip $(SAMPLES))" ]; then \
+		echo "Error: no paired FASTQ samples found in $(FASTQ_DIR)."; \
+		echo "Expected files named SAMPLE_1.fastq and SAMPLE_2.fastq."; \
+		echo "Or provide SAMPLES=\"sample1 sample2\"."; \
+		exit 1; \
+	fi; \
+	test -f "$(REFERENCE)" || { \
+		echo "Error: reference FASTA not found: $(REFERENCE)"; \
+		exit 1; \
+	}
+# Sanity-check the run before doing any real work:
+#   `set -eu` -> fail immediately on any error or unset variable in this recipe
+#   1) REFERENCE must be non-empty (strip trims whitespace before checking)
+#   2) SAMPLES must be non-empty (i.e. discovery found files, or user passed SAMPLES=)
+#   3) REFERENCE must actually exist as a file on disk
+# Each check exits with status 1 and a helpful message if it fails.
+
+reference-index: check-inputs
+	@set -eu; \
+	command -v bwa >/dev/null 2>&1 || { \
+		echo "Error: bwa was not found."; \
+		exit 1; \
+	}; \
+	if [ ! -f "$(REFERENCE).bwt" ]; then \
+		bwa index "$(REFERENCE)"; \
+	fi
+# Depends on check-inputs, so validation always runs first.
+# Confirms `bwa` is installed/on PATH, then builds the bwa index for REFERENCE
+# only if it doesn't already exist (checks for the .bwt file as a proxy for
+# "index already built" — avoids re-indexing every run).
+
+$(OUTDIR)/%.bam: $(FASTQ_DIR)/%_1.fastq $(FASTQ_DIR)/%_2.fastq | reference-index
+	@set -eu; \
+	command -v samtools >/dev/null 2>&1 || { \
+		echo "Error: samtools was not found."; \
+		exit 1; \
+	}; \
+	mkdir -p "$(OUTDIR)"; \
+	bwa mem -t "$(THREADS)" \
+		-R '@RG\tID:$*\tSM:$*\tPL:ILLUMINA' \
+		"$(REFERENCE)" "$<" "$(FASTQ_DIR)/$*_2.fastq" \
+		| samtools sort -@ "$(THREADS)" -o "$@" -
+# Pattern rule: for each sample "%", build bam/%.bam from its paired FASTQs.
+#   $(FASTQ_DIR)/%_1.fastq, $(FASTQ_DIR)/%_2.fastq -> the R1/R2 input files (prerequisites)
+#   | reference-index  -> "order-only" prerequisite: make sure the reference is
+#                         indexed first, but don't rebuild the bam just because
+#                         reference-index's timestamp changed
+# Recipe:
+#   - confirm samtools is installed
+#   - create OUTDIR if missing
+#   - bwa mem aligns the pair, tagging each read with a read group (RG) using
+#     the sample name ($*) for ID/SM and PL:ILLUMINA as the platform
+#   - pipe directly into `samtools sort` (avoids writing an unsorted
+#     intermediate SAM/BAM to disk) to produce the final sorted BAM ($@)
+# ($< = first prerequisite = the _1.fastq file; $* = the stem matched by %; $@ = target)
+
+$(OUTDIR)/%.bam.bai: $(OUTDIR)/%.bam
+	samtools index "$<" "$@"
+# Index each BAM with samtools, producing the matching .bam.bai file.
+
+help:
+	@echo "Align paired FASTQ samples to a reference and create sorted, indexed BAMs:"
+	@echo
+	@echo "  make -f AlignMakefile REFERENCE=reference/genome.fa"
+	@echo "  make -f AlignMakefile REFERENCE=reference/genome.fa SAMPLES=\"sample1 sample2\""
+	@echo
+	@echo "By default, samples are discovered from FASTQ_DIR/*_1.fastq."
+	@echo "Each sample must also have a matching *_2.fastq file."
+	@echo "Optional variables: FASTQ_DIR=fastq OUTDIR=bam THREADS=4"
+# Prints usage instructions — just documentation, no build actions.
+
+clean:
+	rm -f $(BAMS) $(BAIS)
+# Removes all generated BAM and BAI files, letting you rebuild from scratch.
