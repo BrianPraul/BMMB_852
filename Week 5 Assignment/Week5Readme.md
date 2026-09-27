@@ -53,7 +53,8 @@ I got these results:
   
   ##
 3. What percent of the reads align?
-   88.69%
+
+    88.69%
 
 5. What do the alignments and coverage look like?
 
