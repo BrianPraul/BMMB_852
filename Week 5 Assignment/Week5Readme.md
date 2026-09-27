@@ -1,7 +1,6 @@
 # Week 5 Assignment
 
 ##
-NOT DONE YET
 For this week's assignment, we are supposed to create a BAM alignment file using reads obtained in Week 4 and the alignment in Week 3.
 
 ##
@@ -21,7 +20,12 @@ make -f SRRDownloadMakefile ACCESSION=DRR1060913 N=350000
 
   To align the reads, download the makefile under this week's assignment, then run the following command:
 ```
+make -f AlignMakefile REFERENCE=Referencegenome.fasta  SAMPLES=SRR_Accession
 ```
+
+Specifically, I ran:
+
+```make -f AlignMakefile REFERENCE=GCA_060595115.1_genomic.fna  SAMPLES=DRR1060913```
 
 After running the following command to generate a statistics report:
 ```
@@ -49,7 +53,12 @@ I got these results:
   
   ##
 3. What percent of the reads align?
+   88.69%
 
-4. What do the alignments look like?
+5. What do the alignments and coverage look like?
 
-   
+   The coverage is not uniform, and the alignment has several notable gaps. Examples of both are shown below:
+
+   <a href="https://ibb.co/XxGnfhz0"><img src="https://i.ibb.co/8gQynWjv/Screenshot-2026-09-27-at-12-05-07-PM.png" alt="Screenshot-2026-09-27-at-12-05-07-PM" border="0"></a>
+
+<a href="https://ibb.co/RGkN3DKR"><img src="https://i.ibb.co/hxJcBmN3/Screenshot-2026-09-27-at-12-01-40-PM.png" alt="Screenshot-2026-09-27-at-12-01-40-PM" border="0"></a>
