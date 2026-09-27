@@ -1,6 +1,4 @@
 SHELL := /bin/bash
-# Use bash instead of the default /bin/sh so recipes can rely on bash features
-# (e.g. `set -eu`, `[ ]` semantics you're used to).
 
 REFERENCE ?=
 # Path to the reference FASTA. `?=` means it's only set here if not already
