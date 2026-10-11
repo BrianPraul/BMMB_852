@@ -1,0 +1,230 @@
+# Variant calling against a LOCAL reference genome. Nothing is hardcoded:
+# the reference, the reads (or an existing BAM) and the ploidy are all
+# parameters you pass on the command line.
+#
+# Safety features compared with the original VCFMakefile:
+#   - The reference FASTA is never downloaded or overwritten. If REF does not
+#     exist, make stops with an error.
+#   - Output names contain both the sample and the reference name, so results
+#     from different runs or references cannot collide.
+#   - Unmapped reads are kept in the BAM so flagstat shows the true mapping
+#     rate (a very low rate means wrong reads or a wrong reference).
+#   - "make clean" never deletes the reference.
+#   - "make check" verifies every VCF contig exists in the reference.
+#
+# Mode A: align reads, then call variants (RUN = SRA accession or read prefix)
+#   make -f VCFMakefile_local vcf REF=refs/my_ref.fna RUN=SRRxxxxxxx
+#   Paired reads are expected at fastq/${RUN}_1.fastq and fastq/${RUN}_2.fastq
+#   (override with R1=... R2=...). If missing, they are downloaded with
+#   fastq-dump.
+#
+# Mode B: call variants from an existing BAM (no RUN given)
+#   make -f VCFMakefile_local vcf REF=refs/my_ref.fna BAM=path/to/sample.bam
+#
+# Other targets: fastq, check, igv, clean. Optional parameters:
+#   CPU=4  PLOIDY=1  LIMIT=<read pairs to download>  BAM=  VCF=  R1=  R2=
+
+SHELL = bash
+.SHELLFLAGS = -euo pipefail -c
+
+# Required: path to the reference FASTA.
+REF ?=
+
+# Mode A: SRA run accession (or read file prefix).
+RUN ?=
+
+# Mode B: existing BAM. In mode A, leave empty to use bam/<RUN>-<REF name>.bam
+BAM ?=
+
+# Number of compute cores.
+CPU ?= 4
+
+# Ploidy for variant calling (1 for bacteria and haploid viruses).
+PLOIDY ?= 1
+
+# Number of read pairs to download if the FASTQ files are missing.
+# Leave empty to download everything.
+LIMIT ?=
+
+# Short name of the reference, taken from the file name.
+REFNAME = $(basename $(notdir ${REF}))
+
+# All output names share this element.
+ifeq ($(strip ${RUN}),)
+ROOT = $(basename $(notdir ${BAM}))-${REFNAME}
+else
+ROOT = ${RUN}-${REFNAME}
+endif
+
+# Remember whether a BAM was passed, before any default is filled in.
+BAM_GIVEN := $(strip ${BAM})
+
+# Alignment file (derived in mode A unless given).
+ifeq ($(strip ${BAM}),)
+ifeq ($(strip ${RUN}),)
+# Placeholder so the usage text can print; real targets stop with an error above.
+BAM = unset.bam
+else
+BAM = bam/${ROOT}.bam
+endif
+endif
+
+# Variant file.
+VCF ?= vcf/${ROOT}.vcf.gz
+
+# Annotations to include from the mpileup command.
+ANN=-d 100 --annotate 'INFO/AD,FORMAT/DP,FORMAT/AD,FORMAT/ADF,FORMAT/ADR,FORMAT/SP'
+
+# Options for the variant-calling command.
+CALL=--ploidy ${PLOIDY} --annotate 'FORMAT/GQ'
+
+# Original read names and quality trimmed read pairs (mode A).
+R1 ?= fastq/${RUN}_1.fastq
+R2 ?= fastq/${RUN}_2.fastq
+Q1 = fastq/${RUN}_1P.fq
+Q2 = fastq/${RUN}_2P.fq
+
+# Name of the adapter FASTA file.
+ADAPTER_FASTA = adapter.fa
+
+# The BWA index.
+IDX=${REF}.amb
+
+.PHONY: all fastq vcf check igv clean
+
+# Print usage (default target, so it must be the first rule).
+all:
+	@echo "Usage:"
+	@echo
+	@echo "  Align reads and call variants:"
+	@echo "    make -f VCFMakefile_local vcf REF=<reference.fna> RUN=<accession>"
+	@echo
+	@echo "  Call variants from an existing BAM:"
+	@echo "    make -f VCFMakefile_local vcf REF=<reference.fna> BAM=<sample.bam>"
+	@echo
+	@echo "  Other targets (same arguments): fastq, check, igv, clean"
+	@echo "  Optional: CPU=${CPU}  PLOIDY=${PLOIDY}  LIMIT=<read pairs>  VCF=  R1=  R2="
+	@echo
+
+# Stop early if a target is requested without the required arguments.
+ifneq ($(strip ${MAKECMDGOALS}),)
+ifeq ($(strip ${REF}),)
+$(error REF is not set. Pass REF=<reference.fna>)
+endif
+ifeq ($(strip ${RUN}${BAM_GIVEN}),)
+$(error Set RUN=<accession> to align reads, or BAM=<file.bam> to use an existing BAM)
+endif
+endif
+
+# Check that the GNU make version is 4 or higher.
+MAKE_MAJOR := $(firstword $(subst ., ,$(MAKE_VERSION)))
+HASH := \#
+
+ifneq ($(firstword $(sort 4 $(MAKE_MAJOR))),4)
+    $(info $(HASH) This Makefile needs make version 4 or higher.)
+    $(info $(HASH) Activate the bioinfo environment.)
+    $(error Stop.)
+endif
+
+# Check that required executables exist (aligners only needed in mode A).
+ifneq ($(strip ${MAKECMDGOALS}),)
+EXE = samtools bcftools $(if $(strip ${RUN}),bwa trimmomatic)
+K := $(foreach exec,$(EXE),\
+        $(if $(shell which $(exec)),ok,$(error "Program: $(exec) not found.")))
+endif
+
+# The reference must already exist. It is never fetched or overwritten.
+${REF}:
+	@echo "ERROR: reference ${REF} not found. This Makefile never downloads or overwrites references."; exit 1
+
+# FASTA index.
+${REF}.fai: ${REF}
+	samtools faidx ${REF}
+
+# BAM index.
+${BAM}.bai: ${BAM}
+	samtools index ${BAM}
+
+ifeq ($(strip ${RUN}),)
+# Mode B: the BAM must already exist.
+${BAM}:
+	@echo "ERROR: BAM ${BAM} not found. Check the path, or pass RUN=<accession> to align reads."; exit 1
+
+else
+# Mode A: align reads to the reference.
+
+# The BWA index depends on the reference genome.
+${IDX}: ${REF}
+	bwa index ${REF}
+
+# Download the reads if they are not already present.
+# One download produces both mates, so only R1 carries the recipe.
+${R1}:
+	mkdir -p $(dir ${R1})
+	fastq-dump -F $(if ${LIMIT},-X ${LIMIT}) --split-files -O $(dir ${R1}) ${RUN}
+
+${R2}: ${R1}
+	@test -s ${R2} || { echo "ERROR: ${R2} is missing. Put the second mate file there."; exit 1; }
+
+fastq: ${R1} ${R2}
+	ls -l ${R1} ${R2}
+
+# Apply quality control to the reads.
+# Trimming produces both trimmed mates, so only Q1 carries the recipe.
+${Q1}: ${R1} ${R2}
+	printf ">illumina\nAGATCGGAAGAGCACACGTCTGAACTCCAGTCAC\n>nextera\nCTGTCTCTTATACACATCTCCGAGCCCACGAGAC\n" > ${ADAPTER_FASTA}
+	trimmomatic PE -threads ${CPU} -phred33 -basein ${R1} -baseout fastq/${RUN}.fq \
+		ILLUMINACLIP:${ADAPTER_FASTA}:2:30:5 SLIDINGWINDOW:4:15 MINLEN:50
+
+${Q2}: ${Q1}
+	@test -s ${Q2} || { echo "ERROR: ${Q2} was not produced."; exit 1; }
+
+# BAM file depends on the BWA index and reads.
+# Unmapped reads are kept so flagstat reports the true mapping rate.
+${BAM}: ${IDX} ${Q1} ${Q2}
+	mkdir -p $(dir ${BAM})
+	bwa mem -t ${CPU} -R '@RG\tID:${RUN}\tSM:${RUN}' ${REF} ${Q1} ${Q2} | samtools sort -@ ${CPU} > ${BAM}
+	samtools flagstat ${BAM}
+endif
+
+# The VCF file depends on the BAM file, its index and the FASTA index.
+${VCF}: ${BAM} ${BAM}.bai ${REF}.fai
+	mkdir -p $(dir ${VCF})
+	bcftools mpileup ${ANN} -O u -f ${REF} ${BAM} | \
+		bcftools call ${CALL} -mv -O u | \
+		bcftools norm -f ${REF} -d all -O u | \
+		bcftools sort --write-index -O z -o ${VCF}
+	printf "\n# VCF file: ${VCF}\n"
+
+# Generate the VCF file.
+vcf: ${VCF}
+	ls -l ${VCF}
+
+# Verify that BAM and VCF contigs exist in the reference.
+check: ${VCF}
+	@echo "Reference contigs (name, length):"
+	@cut -f1,2 ${REF}.fai
+	@echo "BAM reads per contig (name, length, mapped, unmapped):"
+	@samtools idxstats ${BAM}
+	@echo "VCF contigs (name, length, records):"
+	@bcftools index -s ${VCF}
+	@missing=$$(comm -13 <(cut -f1 ${REF}.fai | sort) <(bcftools index -s ${VCF} | cut -f1 | sort)); \
+	if [ -n "$$missing" ]; then echo "ERROR: VCF contigs not in reference: $$missing"; exit 1; \
+	else echo "OK: all VCF contigs are in the reference."; fi
+
+# Removes created variant files, plus trimmed reads and the BAM in mode A.
+# The reference, original reads and any user-supplied BAM are kept.
+clean:
+	rm -f ${VCF} ${VCF}.csi
+ifneq ($(strip ${RUN}),)
+	rm -f ${Q1} ${Q2} ${BAM} ${BAM}.bai
+endif
+
+# Automating IGV visualization.
+IGV = nc localhost 60151
+PWD = $(shell pwd)
+igv:
+	echo "new" | ${IGV}
+	echo "genome ${PWD}/${REF}" | ${IGV}
+	echo "load ${PWD}/${BAM}" | ${IGV}
+	echo "load ${PWD}/${VCF}" | ${IGV}
