@@ -1,0 +1,171 @@
+# Joint (simultaneous) variant calling of several BAM files against one
+# reference genome. Nothing is hardcoded: the reference, the list of BAM
+# files, the ploidy and the output name are all parameters.
+#
+# All BAMs are piped through ONE bcftools mpileup | call | norm | sort chain,
+# producing a single multi-sample VCF with one column per BAM.
+#
+# Usage:
+#   make -f VCFMakefile_multi vcf REF=fasta/ebola_1976.fasta \
+#        BAMS="bam/EM110.bam bam/EM120.bam bam/G4973.bam"
+#
+# Or put one BAM path per line in a text file (lines starting with # ignored):
+#   make -f VCFMakefile_multi vcf REF=fasta/ebola_1976.fasta BAMLIST=bams.txt
+#
+# Targets: vcf (default work), samples, check, igv, clean
+#
+# Optional parameters (defaults in brackets):
+#   PLOIDY=2   CPU=4   DEPTH=100   PREFIX=merged   VCF=vcf/<PREFIX>-<REF name>.vcf.gz
+#
+# IMPORTANT: bcftools names each VCF column after the SM tag in the BAM read
+# group. If two BAMs share the same SM tag they are merged into ONE sample.
+# "make samples" lists the SM tag of each BAM and stops on duplicates; it is
+# also run automatically before variant calling.
+
+SHELL = bash
+.SHELLFLAGS = -euo pipefail -c
+
+# Required: path to the reference FASTA (never downloaded or overwritten).
+REF ?=
+
+# Required: space-separated list of BAM files ...
+BAMS ?=
+
+# ... or a text file with one BAM path per line.
+BAMLIST ?=
+
+# Ploidy for variant calling (1 for bacteria/haploid viruses, 2 for diploids).
+PLOIDY ?= 1
+
+# Number of compute cores.
+CPU ?= 4
+
+# Maximum per-file read depth considered by mpileup.
+DEPTH ?= 100
+
+# Prefix of the output file name.
+PREFIX ?= merged
+
+# If a list file is given, read BAM paths from it.
+ifneq ($(strip ${BAMLIST}),)
+BAMS := $(shell grep -v '^\s*\#' ${BAMLIST} | grep -v '^\s*$$')
+endif
+
+# Short name of the reference, taken from the file name.
+REFNAME = $(basename $(notdir ${REF}))
+
+# Variant file.
+VCF ?= vcf/${PREFIX}-${REFNAME}.vcf.gz
+
+# Annotations to include from the mpileup command.
+ANN=-d ${DEPTH} --annotate 'INFO/AD,FORMAT/DP,FORMAT/AD,FORMAT/ADF,FORMAT/ADR,FORMAT/SP'
+
+# Options for the variant-calling command.
+CALL=--ploidy ${PLOIDY} --annotate 'FORMAT/GQ'
+
+# Index file for each BAM.
+BAIS = $(addsuffix .bai,${BAMS})
+
+.PHONY: all vcf samples check igv clean
+
+# Print usage (default target, so it must be the first rule).
+all:
+	@echo "Usage:"
+	@echo
+	@echo "  Joint variant calling of several BAMs:"
+	@echo "    make -f VCFMakefile_multi vcf REF=<reference.fa> BAMS=\"a.bam b.bam c.bam\""
+	@echo "    make -f VCFMakefile_multi vcf REF=<reference.fa> BAMLIST=<bams.txt>"
+	@echo
+	@echo "  Other targets (same arguments): samples, check, igv, clean"
+	@echo "  Optional: PLOIDY=${PLOIDY}  CPU=${CPU}  DEPTH=${DEPTH}  PREFIX=${PREFIX}  VCF="
+	@echo
+
+# Stop early if a target is requested without the required arguments.
+ifneq ($(strip ${MAKECMDGOALS}),)
+ifeq ($(strip ${REF}),)
+$(error REF is not set. Pass REF=<reference.fa>)
+endif
+ifeq ($(strip ${BAMS}),)
+$(error No BAM files. Pass BAMS="a.bam b.bam ..." or BAMLIST=<file>)
+endif
+ifeq ($(wildcard ${REF}),)
+$(error Reference ${REF} not found. This Makefile never downloads references)
+endif
+$(foreach b,${BAMS},$(if $(wildcard $b),,$(error BAM file not found: $b)))
+endif
+
+# Check that the GNU make version is 4 or higher.
+MAKE_MAJOR := $(firstword $(subst ., ,$(MAKE_VERSION)))
+HASH := \#
+
+ifneq ($(firstword $(sort 4 $(MAKE_MAJOR))),4)
+    $(info $(HASH) This Makefile needs make version 4 or higher.)
+    $(info $(HASH) Activate the bioinfo environment.)
+    $(error Stop.)
+endif
+
+# Check that required executables exist.
+ifneq ($(strip ${MAKECMDGOALS}),)
+EXE = samtools bcftools
+K := $(foreach exec,$(EXE),\
+        $(if $(shell which $(exec)),ok,$(error "Program: $(exec) not found.")))
+endif
+
+# FASTA index.
+${REF}.fai: ${REF}
+	samtools faidx ${REF}
+
+# BAM index (one rule for every BAM).
+%.bam.bai: %.bam
+	samtools index -@ ${CPU} $<
+
+# Warn if two BAMs would collapse into one sample (same SM tag) or lack one.
+samples:
+	@tab=$$(for b in ${BAMS}; do \
+	    s=$$(samtools view -H $$b | awk '/^@RG/{for(i=2;i<=NF;i++) if($$i ~ /^SM:/) print substr($$i,4)}' | sort -u | paste -sd, -); \
+	    printf "%s\t%s\n" "$${s:-NO_SM_TAG}" "$$b"; \
+	  done); \
+	echo "Sample (SM tag)	BAM file"; echo "$$tab"; \
+	bad=$$(echo "$$tab" | cut -f1 | sort | uniq -d); \
+	none=$$(echo "$$tab" | cut -f1 | grep -x NO_SM_TAG || true); \
+	if [ -n "$$bad" ]; then echo "ERROR: BAMs share the SM tag(s): $$bad. They would be merged into one sample. Fix read groups (samtools addreplacerg)."; exit 1; fi; \
+	if [ -n "$$none" ]; then echo "ERROR: a BAM has no @RG SM tag. Add one with samtools addreplacerg."; exit 1; fi
+
+# The VCF depends on all BAMs, their indexes and the FASTA index.
+# "samples" is order-only: it runs first but does not force a rebuild.
+${VCF}: ${BAMS} ${BAIS} ${REF}.fai | samples
+	mkdir -p $(dir ${VCF})
+	bcftools mpileup --threads ${CPU} ${ANN} -O u -f ${REF} ${BAMS} | \
+		bcftools call --threads ${CPU} ${CALL} -mv -O u | \
+		bcftools norm -f ${REF} -d all -O u | \
+		bcftools sort --write-index -O z -o ${VCF}
+	printf "\n# VCF file: ${VCF}\n"
+
+# Generate the joint VCF file.
+vcf: ${VCF}
+	ls -l ${VCF}
+	@echo "Samples in VCF:"; bcftools query -l ${VCF}
+
+# Verify that VCF contigs exist in the reference and show per-BAM mapping.
+check: ${VCF}
+	@echo "Reference contigs (name, length):"
+	@cut -f1,2 ${REF}.fai
+	@for b in ${BAMS}; do echo "idxstats: $$b (name, length, mapped, unmapped)"; samtools idxstats $$b; done
+	@echo "VCF contigs (name, length, records):"
+	@bcftools index -s ${VCF}
+	@missing=$$(comm -13 <(cut -f1 ${REF}.fai | sort) <(bcftools index -s ${VCF} | cut -f1 | sort)); \
+	if [ -n "$$missing" ]; then echo "ERROR: VCF contigs not in reference: $$missing"; exit 1; \
+	else echo "OK: all VCF contigs are in the reference."; fi
+
+# Removes the variant files only. Reference, BAMs and BAM indexes are kept.
+clean:
+	rm -f ${VCF} ${VCF}.csi
+
+# Automating IGV visualization (IGV must be running with port 60151 enabled).
+IGV = nc localhost 60151
+PWD = $(shell pwd)
+igv:
+	echo "new" | ${IGV}
+	echo "genome ${PWD}/${REF}" | ${IGV}
+	for b in ${BAMS}; do echo "load ${PWD}/$$b" | ${IGV}; done
+	echo "load ${PWD}/${VCF}" | ${IGV}
