@@ -1,6 +1,5 @@
 # Week 8 Assignment
 
-WIP
 #
 For Week 8's Assignment, I had to generate a multisample VCF file, then annotate some of the variants to see how they might have changed the protein.
 
