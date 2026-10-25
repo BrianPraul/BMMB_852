@@ -1,0 +1,406 @@
+# Batch variant calling driven by a design file.
+#
+#   design.csv --> SRR download --> parallel bwa alignment --> ONE joint VCF
+#
+# The design file is a CSV with a header row. Required columns (any order,
+# case-insensitive):
+#     sample   unique sample name; becomes the BAM name and the SM read-group tag
+#     srr      SRA run accession (SRR / ERR / DRR)
+# Optional column:
+#     reads    download only the first <reads> reads of that accession
+#              (also accepted: n, nreads, max_reads). Empty = use N=, else all.
+# Any extra columns (group, host, date, ...) are metadata and are ignored.
+#
+# Usage (most common):
+#   make -f VCFMakefile_batch batch REF=fasta/genome.fa
+#
+# "batch" REDOES EVERY STEP from scratch by default: it first deletes the old
+# FASTQ files, reference indexes, BAMs and VCF, then rebuilds them all. To keep
+# (and reuse) earlier results you must say so explicitly:
+#   SKIP="fetch"              reuse the downloaded reads
+#   SKIP="index"              reuse the reference indexes
+#   SKIP="align"              reuse the BAMs
+#   SKIP="fetch index align"  reuse everything; only the joint VCF is redone
+#   RESUME=1                  same as SKIP="fetch index align"
+# Note: make still rebuilds anything whose inputs are newer. For example, if you
+# redo the index but skip align, the BAMs are rebuilt anyway because they depend
+# on the index.
+#
+# Steps run by "batch" (each one is also a target you can run on its own):
+#   tools   check that all programs are installed
+#   design  validate design.csv (names, accessions, duplicates)
+#   index   index the reference once (bwa + samtools faidx)
+#   fetch   download reads with fastq-dump, DL_JOBS samples at a time
+#   align   GNU Parallel: one bwa mem | samtools sort job per sample, all at once
+#   vcf     one bcftools mpileup | call | norm | sort over ALL BAMs -> single VCF
+#
+# Other targets: fresh, samples, refcheck, check, igv, clean, clean-reads, clean-bam, help
+#
+# Parameters (defaults in brackets):
+#   REF=<fasta>      reference genome (required, never downloaded or overwritten)
+#   DESIGN=design.csv
+#   PLOIDY=1  DEPTH=100  PREFIX=merged  VCF=vcf/<PREFIX>-<REF name>.vcf.gz
+#   JOBS=<number of samples>   alignment jobs run at the same time
+#   DL_JOBS=4                  simultaneous downloads (be polite to NCBI)
+#   CORES=<SLURM_CPUS_PER_TASK, else detected>   total cores available
+#   THREADS=CORES/JOBS         threads given to each alignment job
+#   OUTDIR=fastq               directory for the downloaded FASTQ files
+#   N=                         optional default: first N reads of every run
+#                              (the design file's reads column wins per sample);
+#                              empty = the whole run
+#
+# On a SLURM cluster, ask for enough cores and run inside the allocation, e.g.
+#   sbatch -c 20 --mem=64G --wrap "make -f VCFMakefile_batch batch REF=fasta/genome.fa"
+# 10 samples on 20 cores -> 10 parallel jobs with 2 threads each.
+#
+# Running a single step on its own (make fetch / align / vcf) behaves like normal
+# make and skips work that is already done; run "make fresh" first, or add -B,
+# to force it. Only "batch" starts from scratch automatically.
+
+SHELL = bash
+.SHELLFLAGS = -euo pipefail -c
+.DELETE_ON_ERROR:
+
+# Path of this Makefile, used when GNU Parallel calls make for each sample.
+MAKEFILE := $(firstword ${MAKEFILE_LIST})
+
+# Required: path to the reference FASTA.
+REF ?=
+
+# Design file.
+DESIGN ?= design.csv
+
+# Ploidy for variant calling (1 for bacteria/haploid viruses, 2 for diploids).
+PLOIDY ?= 1
+
+# Maximum per-file read depth considered by mpileup.
+DEPTH ?= 100
+
+# Prefix of the output file name.
+PREFIX ?= merged
+
+# Simultaneous downloads.
+DL_JOBS ?= 4
+
+# Steps to KEEP instead of redoing (any of: fetch index align). RESUME=1 keeps all three.
+SKIP ?=
+RESUME ?= 0
+SKIPPED := $(sort ${SKIP} $(if $(filter 1,${RESUME}),fetch index align))
+ifneq ($(filter-out fetch index align,${SKIPPED}),)
+$(error Unknown step in SKIP: $(filter-out fetch index align,${SKIPPED}). Use any of: fetch index align)
+endif
+DO_FETCH := $(if $(filter fetch,${SKIPPED}),0,1)
+DO_INDEX := $(if $(filter index,${SKIPPED}),0,1)
+DO_ALIGN := $(if $(filter align,${SKIPPED}),0,1)
+
+# Directory for the downloaded FASTQ files.
+OUTDIR ?= fastq
+
+# Optional: only the first N reads of every run (empty = whole run).
+N ?=
+
+HASH := \#
+
+# ---------------------------------------------------------------------------
+# Read the design file: SAMPLE:SRR pairs (header-aware, ignores comments,
+# blank lines, quotes and Windows line endings).
+# ---------------------------------------------------------------------------
+ifneq ($(wildcard ${DESIGN}),)
+PAIRS := $(shell sed '1s/^\xEF\xBB\xBF//' ${DESIGN} | awk -F, 'NR==1{for(i=1;i<=NF;i++){h=tolower($$i);gsub(/[ "\r]/,"",h);if(h=="sample")s=i;if(h=="srr"||h=="run"||h=="accession")r=i;if(h=="reads"||h=="n"||h=="nreads"||h=="max_reads")n=i};next} /^[ \t]*($(HASH)|$$)/{next} {gsub(/[ "\r]/,"");print $$s":"$$r":"(n?$$n:"")}')
+endif
+
+SAMPLES := $(foreach p,${PAIRS},$(firstword $(subst :, ,$p)))
+NSAMPLES := $(words ${SAMPLES})
+
+# Resources: how many alignments at once and how many threads each gets.
+JOBS ?= $(if $(filter 0,${NSAMPLES}),1,${NSAMPLES})
+# nproc is missing on some systems (e.g. macOS), so fall back to getconf, then
+# sysctl, then 1. Set CORES=<n> on the command line to override.
+CORES ?= $(if ${SLURM_CPUS_PER_TASK},${SLURM_CPUS_PER_TASK},$(shell nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 1))
+THREADS ?= $(shell t=$$(( ${CORES} / ${JOBS} )); echo $$(( t < 1 ? 1 : t )))
+
+# Short name of the reference, taken from the file name.
+REFNAME = $(basename $(notdir ${REF}))
+
+# Joint variant file.
+VCF ?= vcf/${PREFIX}-${REFNAME}.vcf.gz
+
+# One BAM per sample (can be overridden with BAMS="...").
+BAMS ?= $(addprefix bam/,$(addsuffix .bam,${SAMPLES}))
+BAIS = $(addsuffix .bai,${BAMS})
+
+# Annotations to include from the mpileup command.
+ANN=-d ${DEPTH} --annotate 'INFO/AD,FORMAT/DP,FORMAT/AD,FORMAT/ADF,FORMAT/ADR,FORMAT/SP'
+
+# Options for the variant-calling command.
+CALL=--ploidy ${PLOIDY} --annotate 'FORMAT/GQ'
+
+# Per-sample variables (SRR, name) used by the generic rules below.
+define SAMPLE_RULES
+${OUTDIR}/$(1).fetched: SRR=$(2)
+${OUTDIR}/$(1).fetched: NREADS=$(3)
+bam/$(1).bam: SRR=$(2)
+endef
+$(foreach p,${PAIRS},$(eval $(call SAMPLE_RULES,$(word 1,$(subst :, ,$p)),$(word 2,$(subst :, ,$p)),$(word 3,$(subst :, ,$p)))))
+
+.PHONY: all help batch fresh tools design index fetch align vcf samples refcheck check igv clean clean-reads clean-bam
+
+# Print usage (default target, so it must be the first rule).
+all help:
+	@echo "Usage:"
+	@echo "  make -f ${MAKEFILE} batch REF=<reference.fa> [DESIGN=design.csv]"
+	@echo
+	@echo "  Steps: tools design index fetch align vcf   (batch runs them all)"
+	@echo "  batch redoes every step; keep earlier results with SKIP=\"fetch index align\" or RESUME=1"
+	@echo "  Other: fresh samples refcheck check igv clean clean-reads clean-bam"
+	@echo "  Optional: JOBS=${JOBS} DL_JOBS=${DL_JOBS} CORES=${CORES} THREADS=${THREADS}"
+	@echo "            PLOIDY=${PLOIDY} DEPTH=${DEPTH} PREFIX=${PREFIX} OUTDIR=${OUTDIR} N=${N}"
+	@echo
+
+# ---------------------------------------------------------------------------
+# Early argument checks (only for goals that need them).
+# ---------------------------------------------------------------------------
+NEED_DESIGN = batch fresh design fetch align vcf samples check igv ${OUTDIR}/% bam/%
+NEED_REF = batch fresh index align vcf samples check igv bam/%
+
+ifneq ($(filter ${NEED_DESIGN},${MAKECMDGOALS}),)
+ifeq ($(wildcard ${DESIGN}),)
+$(error Design file ${DESIGN} not found. Pass DESIGN=<file.csv>)
+endif
+ifneq ($(filter-out design,${MAKECMDGOALS}),)
+ifeq ($(strip ${SAMPLES}),)
+$(error No samples found in ${DESIGN}. It needs a header with sample and srr columns)
+endif
+endif
+endif
+
+ifneq ($(filter ${NEED_REF},${MAKECMDGOALS}),)
+ifeq ($(strip ${REF}),)
+$(error REF is not set. Pass REF=<reference.fa>)
+endif
+ifeq ($(wildcard ${REF}),)
+$(error Reference ${REF} not found. This Makefile never downloads references)
+endif
+endif
+
+# Check that the GNU make version is 4 or higher.
+MAKE_MAJOR := $(firstword $(subst ., ,$(MAKE_VERSION)))
+ifneq ($(firstword $(sort 4 $(MAKE_MAJOR))),4)
+    $(info $(HASH) This Makefile needs make version 4 or higher.)
+    $(info $(HASH) Activate the bioinfo environment.)
+    $(error Stop.)
+endif
+
+# ---------------------------------------------------------------------------
+# The whole workflow.
+# ---------------------------------------------------------------------------
+batch: tools design
+	$(MAKE) -f ${MAKEFILE} --no-print-directory fresh
+	@echo "== ${NSAMPLES} samples from ${DESIGN}: ${JOBS} parallel alignments x ${THREADS} threads =="
+	$(MAKE) -f ${MAKEFILE} --no-print-directory index
+	$(MAKE) -f ${MAKEFILE} --no-print-directory fetch
+	$(MAKE) -f ${MAKEFILE} --no-print-directory align
+	$(MAKE) -f ${MAKEFILE} --no-print-directory vcf
+
+# Delete the old results of every step that is not listed in SKIP, so that
+# "batch" starts from scratch. The joint VCF is always redone.
+fresh:
+	@echo "Redoing: $(if $(filter 1,${DO_FETCH}),fetch )$(if $(filter 1,${DO_INDEX}),index )$(if $(filter 1,${DO_ALIGN}),align )vcf"
+	@echo "Keeping: $(if ${SKIPPED},${SKIPPED},nothing)"
+	@if [ "${DO_FETCH}" = 1 ]; then \
+	    for p in ${PAIRS}; do \
+	        s=$${p%%:*}; r=$${p#*:}; r=$${r%%:*}; \
+	        rm -f ${OUTDIR}/$${s}.fetched ${OUTDIR}/$${r}.fastq.gz ${OUTDIR}/$${r}_1.fastq.gz ${OUTDIR}/$${r}_2.fastq.gz; \
+	    done; \
+	fi
+	@if [ "${DO_INDEX}" = 1 ]; then \
+	    rm -f ${REF}.fai ${REF}.amb ${REF}.ann ${REF}.bwt ${REF}.pac ${REF}.sa; \
+	fi
+	@if [ "${DO_ALIGN}" = 1 ]; then \
+	    rm -f ${BAMS} ${BAIS} bam/*.part bam/*.sorttmp.* $(addprefix logs/,$(addsuffix .flagstat.txt,${SAMPLES})); \
+	fi
+	@rm -f ${VCF} ${VCF}.csi
+
+# Check that required executables exist.
+tools:
+	@for t in samtools bcftools bwa parallel fastq-dump; do \
+	    command -v $$t >/dev/null || { echo "ERROR: $$t not found. Activate the bioinfo environment."; missing=1; }; \
+	done; [ -z "$${missing:-}" ]
+
+# Validate the design file.
+design:
+	@test -n "${PAIRS}" || { echo "ERROR: no samples read from ${DESIGN}"; exit 1; }
+	@for col in sample srr; do \
+	    head -n1 ${DESIGN} | sed '1s/^\xEF\xBB\xBF//' | tr -d '\r" ' | tr 'A-Z' 'a-z' | tr ',' '\n' | grep -qxE "$$col|$${col/srr/run}|$${col/srr/accession}" \
+	    || { echo "ERROR: ${DESIGN} has no '$$col' column in its header"; exit 1; }; \
+	done
+	@printf '%s\n' ${PAIRS} | awk -F: 'BEGIN{print "Sample\tSRR\tReads"} \
+	    {print $$1"\t"$$2"\t"($$3==""?"${N}":$$3); \
+	     if($$3 != "" && $$3 !~ /^[1-9][0-9]*$$/){print "ERROR: bad reads for "$$1": "$$3 > "/dev/stderr"; bad=1} \
+	     if($$1 !~ /^[A-Za-z0-9_.-]+$$/){print "ERROR: bad sample name: "$$1 > "/dev/stderr"; bad=1} \
+	     if($$2 !~ /^[SED]RR[0-9]+$$/){print "ERROR: bad SRR for "$$1": "$$2 > "/dev/stderr"; bad=1} \
+	     if(sn[$$1]++){print "ERROR: duplicate sample: "$$1 > "/dev/stderr"; bad=1} \
+	     if(sr[$$2]++){print "ERROR: duplicate SRR: "$$2 > "/dev/stderr"; bad=1}} \
+	    END{print NR" samples"; exit bad}'
+
+# ---------------------------------------------------------------------------
+# Reference indexes (built once, before any parallel work starts).
+# ---------------------------------------------------------------------------
+ifneq ($(strip ${REF}),)
+${REF}.fai: ${REF}
+	samtools faidx ${REF}
+
+${REF}.bwt: ${REF}
+	bwa index ${REF}
+endif
+
+index: ${REF}.fai ${REF}.bwt
+
+# ---------------------------------------------------------------------------
+# Download: DL_JOBS samples at a time.
+# ---------------------------------------------------------------------------
+fetch: design
+	mkdir -p logs
+	parallel --halt now,fail=1 --tag --line-buffer -j ${DL_JOBS} --joblog logs/fetch.joblog \
+	    '$(MAKE) -f ${MAKEFILE} --no-print-directory ${OUTDIR}/{}.fetched' ::: ${SAMPLES}
+
+# One sample: SRR -> FASTQ (gzipped). The stamp file marks a finished download.
+# Reads per accession: the design file's reads column, else N=, else the whole run.
+${OUTDIR}/%.fetched:
+	@set -eu; \
+	if [ -z "${SRR}" ]; then \
+		echo "Error: no SRR known for sample $*."; \
+		exit 1; \
+	fi; \
+	if [ -n "$(or ${NREADS},${N})" ]; then \
+		case "$(or ${NREADS},${N})" in \
+			*[!0-9]*|0) echo "Error: reads (or N) must be a positive integer."; exit 1 ;; \
+		esac; \
+	fi; \
+	command -v fastq-dump >/dev/null 2>&1 || { \
+		echo "Error: fastq-dump was not found."; \
+		echo "Install the NCBI SRA Toolkit first."; \
+		exit 1; \
+	}; \
+	mkdir -p "${OUTDIR}" logs; \
+	echo "[$*] downloading ${SRR} $(if $(or ${NREADS},${N}),(first $(or ${NREADS},${N}) reads))"; \
+	fastq-dump $(if $(or ${NREADS},${N}),-X "$(or ${NREADS},${N})") \
+		--outdir "${OUTDIR}" \
+		--split-files \
+		--gzip \
+		"${SRR}"; \
+	test -s "${OUTDIR}/${SRR}_1.fastq.gz" || { \
+		echo "Error: no FASTQ produced for ${SRR}."; \
+		exit 1; \
+	}; \
+	touch $@
+
+# ---------------------------------------------------------------------------
+# Alignment: ALL samples at once with GNU Parallel.
+# ---------------------------------------------------------------------------
+align: design index
+	mkdir -p logs
+	parallel --halt now,fail=1 --tag --line-buffer -j ${JOBS} --joblog logs/align.joblog \
+	    '$(MAKE) -f ${MAKEFILE} --no-print-directory bam/{}.bam' ::: ${SAMPLES}
+
+# One sample: reads -> sorted, indexed BAM. Paired-end is detected automatically.
+# The sample name from the design file becomes the read-group SM tag, so every
+# BAM is a distinct column in the final VCF.
+bam/%.bam: ${OUTDIR}/%.fetched ${REF}.bwt ${REF}.fai
+	mkdir -p bam logs
+	r1=${OUTDIR}/${SRR}_1.fastq.gz; r2=${OUTDIR}/${SRR}_2.fastq.gz; \
+	if [ -s $$r1 ] && [ -s $$r2 ]; then fq="$$r1 $$r2"; else fq=$$r1; fi; \
+	echo "[$*] aligning: $$fq"; \
+	bwa mem -t ${THREADS} -R '@RG\tID:$*\tSM:$*\tLB:$*\tPL:ILLUMINA' ${REF} $$fq | \
+	    samtools sort -@ ${THREADS} -T bam/$*.sorttmp -O bam -o $@.part -
+	mv $@.part $@
+	samtools index -@ ${THREADS} $@
+	samtools flagstat $@ > logs/$*.flagstat.txt
+
+# BAM index (for BAMs supplied through BAMS=).
+%.bam.bai: %.bam
+	samtools index -@ ${THREADS} $<
+
+# ---------------------------------------------------------------------------
+# Joint variant calling: ONE chain over all BAMs -> a single multi-sample VCF.
+# ---------------------------------------------------------------------------
+# Warn if two BAMs would collapse into one sample (same SM tag) or lack one.
+samples:
+	@tab=$$(for b in ${BAMS}; do \
+	    s=$$(samtools view -H $$b | awk '/^@RG/{for(i=2;i<=NF;i++) if($$i ~ /^SM:/) print substr($$i,4)}' | sort -u | paste -sd, -); \
+	    printf "%s\t%s\n" "$${s:-NO_SM_TAG}" "$$b"; \
+	  done); \
+	echo "Sample (SM tag)	BAM file"; echo "$$tab"; \
+	bad=$$(echo "$$tab" | cut -f1 | sort | uniq -d); \
+	none=$$(echo "$$tab" | cut -f1 | grep -x NO_SM_TAG || true); \
+	if [ -n "$$bad" ]; then echo "ERROR: BAMs share the SM tag(s): $$bad. They would be merged into one sample. Fix read groups (samtools addreplacerg)."; exit 1; fi; \
+	if [ -n "$$none" ]; then echo "ERROR: a BAM has no @RG SM tag. Add one with samtools addreplacerg."; exit 1; fi
+
+# Stop early if any BAM was aligned to a different reference than REF (for
+# example BAMs left over from an earlier run with another reference). Without
+# this check bcftools prints one "sequence not found" error per variant.
+refcheck:
+	@for b in ${BAMS}; do \
+	    bad=$$(comm -13 <(cut -f1 ${REF}.fai | sort -u) <(samtools view -H $$b | awk '$$1=="@SQ"{sub(/^SN:/,"",$$2); print $$2}' | sort -u)); \
+	    if [ -n "$$bad" ]; then \
+	        echo "ERROR: $$b was aligned to a different reference than ${REF}."; \
+	        echo "       Contigs in the BAM but not in the reference, e.g.: $$(echo "$$bad" | head -3 | paste -sd' ' -)"; \
+	        echo "       Remove the old reference indexes and BAMs, then rerun:"; \
+	        echo "         rm -f ${REF}.fai ${REF}.amb ${REF}.ann ${REF}.bwt ${REF}.pac ${REF}.sa"; \
+	        echo "         make -f ${MAKEFILE} clean-bam"; \
+	        exit 1; \
+	    fi; \
+	done; echo "OK: all BAMs match the reference contigs."
+
+# The VCF depends on all BAMs, their indexes and the FASTA index.
+# "samples" and "refcheck" are order-only: they run after the BAMs exist but do
+# not force a rebuild.
+${VCF}: ${BAMS} ${BAIS} ${REF}.fai | samples refcheck
+	mkdir -p $(dir ${VCF})
+	bcftools mpileup --threads ${CORES} ${ANN} -O u -f ${REF} ${BAMS} | \
+		bcftools call --threads ${CORES} ${CALL} -mv -O u | \
+		bcftools norm -f ${REF} -d all -O u | \
+		bcftools sort --write-index -O z -o ${VCF}
+	printf "\n# VCF file: ${VCF}\n"
+
+# Generate the joint VCF file.
+vcf: ${VCF}
+	ls -l ${VCF}
+	@echo "Samples in VCF:"; bcftools query -l ${VCF}
+
+# Verify that VCF contigs exist in the reference and show per-BAM mapping.
+check: ${VCF}
+	@echo "Reference contigs (name, length):"
+	@cut -f1,2 ${REF}.fai
+	@for b in ${BAMS}; do echo "idxstats: $$b (name, length, mapped, unmapped)"; samtools idxstats $$b; done
+	@echo "VCF contigs (name, length, records):"
+	@bcftools index -s ${VCF}
+	@missing=$$(comm -13 <(cut -f1 ${REF}.fai | sort) <(bcftools index -s ${VCF} | cut -f1 | sort)); \
+	if [ -n "$$missing" ]; then echo "ERROR: VCF contigs not in reference: $$missing"; exit 1; \
+	else echo "OK: all VCF contigs are in the reference."; fi
+
+# ---------------------------------------------------------------------------
+# Cleaning.
+# ---------------------------------------------------------------------------
+# Removes the variant files only. Reference, reads and BAMs are kept.
+clean:
+	rm -f ${VCF} ${VCF}.csi
+
+# Removes downloaded reads and their stamp files (BAMs are kept).
+clean-reads:
+	rm -rf "${OUTDIR}"
+
+# Removes BAMs, their indexes and alignment logs.
+clean-bam:
+	rm -rf bam logs
+
+# ---------------------------------------------------------------------------
+# Automating IGV visualization (IGV must be running with port 60151 enabled).
+# ---------------------------------------------------------------------------
+IGV = nc localhost 60151
+PWD = $(shell pwd)
+igv:
+	echo "new" | ${IGV}
+	echo "genome ${PWD}/${REF}" | ${IGV}
+	for b in ${BAMS}; do echo "load ${PWD}/$$b" | ${IGV}; done
+	echo "load ${PWD}/${VCF}" | ${IGV}
