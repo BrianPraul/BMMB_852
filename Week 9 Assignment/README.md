@@ -14,7 +14,11 @@ To run the workflow, use one of the following commands, depending on whether you
 
 ```
 make -f VCFMakefile_batch all   REF=fasta/genome.fa   # ONE sample (first row of the design file)
+```
+```
 make -f VCFMakefile_batch all   REF=fasta/genome.fa SAMPLE=S05   # one chosen sample
+```
+```
 make -f VCFMakefile_batch batch REF=fasta/genome.fa   # ALL samples -> one joint VCF
 ```
 
