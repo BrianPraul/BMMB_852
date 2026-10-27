@@ -10,10 +10,12 @@ For this submission I used the same Bioproject I have been using: ```PRJDB42458`
 
 # 2. Running the Workflow.
 
-To run the workflow, use the following command:
+To run the workflow, use one of the following commands, depending on whether you want to run one sample or as a batch:
 
 ```
- make -f VCFMakefile_batch batch REF=REF.fna
+make -f VCFMakefile_batch all   REF=fasta/genome.fa   # ONE sample (first row of the design file)
+make -f VCFMakefile_batch all   REF=fasta/genome.fa SAMPLE=S05   # one chosen sample
+make -f VCFMakefile_batch batch REF=fasta/genome.fa   # ALL samples -> one joint VCF
 ```
 
 The reference genome I used is accession ```GCA_060595115.1```, which I'd renamed to ```Sentericaref.fna```
