@@ -12,7 +12,14 @@
 # Any extra columns (group, host, date, ...) are metadata and are ignored.
 #
 # Usage (most common):
-#   make -f VCFMakefile_batch batch REF=fasta/genome.fa
+#   make -f VCFMakefile_batch all   REF=fasta/genome.fa   # ONE sample (first row of the design file)
+#   make -f VCFMakefile_batch all   REF=fasta/genome.fa SAMPLE=S05   # one chosen sample
+#   make -f VCFMakefile_batch batch REF=fasta/genome.fa   # ALL samples -> one joint VCF
+#
+# "all" is the default target, so "make -f VCFMakefile_batch REF=..." also works.
+# To avoid typing REF every time: export REF=fasta/genome.fa (or edit "REF ?=" below).
+# A one-sample run names its VCF after the sample (vcf/S01-<ref>.vcf.gz), so it
+# never overwrites the joint VCF from "batch". ONLY="S01 S02" runs any subset.
 #
 # "batch" REDOES EVERY STEP from scratch by default: it first deletes the old
 # FASTQ files, reference indexes, BAMs and VCF, then rebuilds them all. To keep
@@ -34,7 +41,7 @@
 #   align   GNU Parallel: one bwa mem | samtools sort job per sample, all at once
 #   vcf     one bcftools mpileup | call | norm | sort over ALL BAMs -> single VCF
 #
-# Other targets: fresh, samples, refcheck, check, igv, clean, clean-reads, clean-bam, help
+# Other targets: help, fresh, samples, refcheck, check, igv, clean, clean-reads, clean-bam, help
 #
 # Parameters (defaults in brackets):
 #   REF=<fasta>      reference genome (required, never downloaded or overwritten)
@@ -76,8 +83,14 @@ PLOIDY ?= 1
 # Maximum per-file read depth considered by mpileup.
 DEPTH ?= 100
 
-# Prefix of the output file name.
-PREFIX ?= merged
+# Run only these samples from the design file (empty = all). "make all" sets it
+# to one sample: SAMPLE=<name>, default the first row of the design file.
+ONLY ?=
+SAMPLE ?=
+
+# Prefix of the output file name (the sample name(s) when ONLY is used).
+space := $(subst ,, )
+PREFIX ?= $(if $(strip ${ONLY}),$(subst ${space},_,$(strip ${ONLY})),merged)
 
 # Simultaneous downloads.
 DL_JOBS ?= 4
@@ -106,8 +119,11 @@ HASH := \#
 # blank lines, quotes and Windows line endings).
 # ---------------------------------------------------------------------------
 ifneq ($(wildcard ${DESIGN}),)
-PAIRS := $(shell sed '1s/^\xEF\xBB\xBF//' ${DESIGN} | awk -F, 'NR==1{for(i=1;i<=NF;i++){h=tolower($$i);gsub(/[ "\r]/,"",h);if(h=="sample")s=i;if(h=="srr"||h=="run"||h=="accession")r=i;if(h=="reads"||h=="n"||h=="nreads"||h=="max_reads")n=i};next} /^[ \t]*($(HASH)|$$)/{next} {gsub(/[ "\r]/,"");print $$s":"$$r":"(n?$$n:"")}')
+PAIRS_ALL := $(shell sed '1s/^\xEF\xBB\xBF//' ${DESIGN} | awk -F, 'NR==1{for(i=1;i<=NF;i++){h=tolower($$i);gsub(/[ "\r]/,"",h);if(h=="sample")s=i;if(h=="srr"||h=="run"||h=="accession")r=i;if(h=="reads"||h=="n"||h=="nreads"||h=="max_reads")n=i};next} /^[ \t]*($(HASH)|$$)/{next} {gsub(/[ "\r]/,"");print $$s":"$$r":"(n?$$n:"")}')
 endif
+
+# Keep only the requested samples (all of them when ONLY is empty).
+PAIRS := $(if $(strip ${ONLY}),$(foreach p,${PAIRS_ALL},$(if $(filter $(firstword $(subst :, ,$p)),${ONLY}),$p)),${PAIRS_ALL})
 
 SAMPLES := $(foreach p,${PAIRS},$(firstword $(subst :, ,$p)))
 NSAMPLES := $(words ${SAMPLES})
@@ -143,12 +159,14 @@ bam/$(1).bam: SRR=$(2)
 endef
 $(foreach p,${PAIRS},$(eval $(call SAMPLE_RULES,$(word 1,$(subst :, ,$p)),$(word 2,$(subst :, ,$p)),$(word 3,$(subst :, ,$p)))))
 
+.DEFAULT_GOAL := all
 .PHONY: all help batch fresh tools design index fetch align vcf samples refcheck check igv clean clean-reads clean-bam
 
-# Print usage (default target, so it must be the first rule).
-all help:
+# Print usage.
+help:
 	@echo "Usage:"
-	@echo "  make -f ${MAKEFILE} batch REF=<reference.fa> [DESIGN=design.csv]"
+	@echo "  make -f ${MAKEFILE} all   REF=<reference.fa>   one sample (first in ${DESIGN}, or SAMPLE=<name>)"
+	@echo "  make -f ${MAKEFILE} batch REF=<reference.fa>   all samples -> one joint VCF"
 	@echo
 	@echo "  Steps: tools design index fetch align vcf   (batch runs them all)"
 	@echo "  batch redoes every step; keep earlier results with SKIP=\"fetch index align\" or RESUME=1"
@@ -160,21 +178,25 @@ all help:
 # ---------------------------------------------------------------------------
 # Early argument checks (only for goals that need them).
 # ---------------------------------------------------------------------------
-NEED_DESIGN = batch fresh design fetch align vcf samples check igv ${OUTDIR}/% bam/%
-NEED_REF = batch fresh index align vcf samples check igv bam/%
+GOALS := $(or ${MAKECMDGOALS},all)
+NEED_DESIGN = all batch fresh design fetch align vcf samples check igv ${OUTDIR}/% bam/%
+NEED_REF = all batch fresh index align vcf samples check igv bam/%
 
-ifneq ($(filter ${NEED_DESIGN},${MAKECMDGOALS}),)
+ifneq ($(filter ${NEED_DESIGN},${GOALS}),)
 ifeq ($(wildcard ${DESIGN}),)
 $(error Design file ${DESIGN} not found. Pass DESIGN=<file.csv>)
 endif
-ifneq ($(filter-out design,${MAKECMDGOALS}),)
+ifneq ($(filter-out design,${GOALS}),)
 ifeq ($(strip ${SAMPLES}),)
+ifneq ($(strip ${ONLY}),)
+$(error None of ONLY="${ONLY}" found in ${DESIGN}. Check the sample names)
+endif
 $(error No samples found in ${DESIGN}. It needs a header with sample and srr columns)
 endif
 endif
 endif
 
-ifneq ($(filter ${NEED_REF},${MAKECMDGOALS}),)
+ifneq ($(filter ${NEED_REF},${GOALS}),)
 ifeq ($(strip ${REF}),)
 $(error REF is not set. Pass REF=<reference.fa>)
 endif
@@ -194,6 +216,12 @@ endif
 # ---------------------------------------------------------------------------
 # The whole workflow.
 # ---------------------------------------------------------------------------
+# One sample: the first row of the design file, or SAMPLE=<name>.
+all:
+	@echo "== single-sample run: $(or ${SAMPLE},$(firstword ${SAMPLES})) (use 'batch' for all ${NSAMPLES} samples) =="
+	$(MAKE) -f ${MAKEFILE} --no-print-directory batch ONLY=$(or ${SAMPLE},$(firstword ${SAMPLES}))
+
+# All samples in the design file (or the subset named in ONLY).
 batch: tools design
 	$(MAKE) -f ${MAKEFILE} --no-print-directory fresh
 	@echo "== ${NSAMPLES} samples from ${DESIGN}: ${JOBS} parallel alignments x ${THREADS} threads =="
