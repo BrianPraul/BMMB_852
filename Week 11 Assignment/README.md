@@ -32,6 +32,10 @@ Visualize the coverage for all samples and the GTF file in IGV.
     
 6. Can you find a gene/transcript where the expression is clearly different between the two sample types? What is the fold change?
 
+
+<img width="1067" height="690" alt="Screenshot 2026-11-07 at 5 10 26 PM" src="https://github.com/user-attachments/assets/de9a24e6-7ca8-4a21-9288-7c782afa0eb6" />
+
+
 7. Is the transcript upregulated or downregulated?
   
 8. How certain are you that it is not a random fluctuation? Why?
