@@ -13,6 +13,8 @@ This week's assignment:
 
    TranscriptCountMatrix.R takes the transcript-based counts (in the quant.sf files within the project root) and design file and make the count matrix in a csv. MakeGeneCountMatrix.R takes the transcript-level matrix and condenses it to a gene-level count matrix. Finally, AddGeneNames.R adds common gene names to the gene-level count matrix, as long as you have the GTF file in the same directory.
 
+   I was surprised at how easily the prompting process worked. I did find I needed to be very specific telling the AI which packages I didn't have installed, and making sure it all worked in the correct directory. It also tried to do transcripts per million (TPM) initially, which I had to dissuade it from doing.
+
 5. Refer to your previous assignment that visually identified highly expressed genes. Does your count matrix support the visually identified behavior?
 
 Yes, the count matrix generally supports the behavior observed the previous week. Two examples from last week included this gene, which was highly expressed in all samples:
