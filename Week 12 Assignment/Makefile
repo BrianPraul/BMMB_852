@@ -1,60 +1,73 @@
-# RNA-Seq Analysis with the Salmon aligner
+# Transcript-based RNA-Seq quantification with Salmon
+#
+# Usage (run from the project root):
+#   make index
+#   make SAMPLE=HBR_1 counts
+#   make batch
+#
+# Alternate transcripts file (use a separate OUTDIR so results don't mix):
+#   make batch FASTA=fasta/other.fa OUTDIR=counts_other
 
-# The location for the data
-DATA_URL=http://data.biostarhandbook.com/data/rnaseq-tutorial-2026.tar.gz
+# --- Inputs ---
 
-# The reference genome file
-FASTA=fasta/chr22.transcripts.fa
+# Transcript sequences (cDNA) to quantify against
+FASTA = fasta/chr22.transcripts.fa
 
-# The directory for the index
-FASTA_IDX_DIR = fasta/chr22.salmon
+# Salmon index directory, derived from the fasta name so each fasta gets its own index
+FASTA_IDX_DIR = $(patsubst %.fa,%.salmon,${FASTA})
 
-# The index file sentinel
-FASTA_IDX = ${FASTA_IDX_DIR}/index.ctab
+# Sentinel file marking a finished index (touched after salmon index succeeds)
+FASTA_IDX = ${FASTA_IDX_DIR}/index.done
 
-# The annotation file
-GTF=gtf/chr22.gtf
+# Annotation file (not used by salmon itself, kept for the downstream gene summary)
+GTF = gtf/chr22.gtf
+
+# Optional download location for the example data
+DATA_URL = http://data.biostarhandbook.com/data/rnaseq-tutorial-2026.tar.gz
+
+# Design file with a "sample" column
+DESIGN = design.csv
+
+# --- Per-sample settings ---
 
 # The sample name
 SAMPLE = HBR_1
 
-# The path to the read file
-R1=fastq/${SAMPLE}_R1.fq
+# Single-end reads for the sample
+R1 = fastq/${SAMPLE}_R1.fq
 
-# Countdir files as text
-COUNT_DIR = counts/${SAMPLE}
-
-# Salmon counts file
+# Root output directory (use a different one per fasta) and the sample's directory
+OUTDIR = counts
+COUNT_DIR = ${OUTDIR}/${SAMPLE}
 COUNTS = ${COUNT_DIR}/quant.sf
 
-# Design file
-DESIGN = design.csv
+# --- Resources ---
 
+# Threads per salmon run
+THREADS = 4
 
-# The design file
-DESIGN = design.csv
+# Samples run in parallel in batch mode (2 jobs x 4 threads = 8 cores)
+JOBS = 2
+PARALLEL = parallel --eta --colsep , --header : --jobs ${JOBS} --lb
 
-# Run two jobs at a time since the alignment is already multithreadedwith 4 threads, thus using 2x4=8 cores
-PARALLEL = parallel --eta --colsep , --header : --jobs 2 --lb
+# This makefile, so batch mode can call it again from any directory layout
+MAKEFILE := $(lastword $(MAKEFILE_LIST))
 
 # --- All definitions above this line. All code below this line ---
 
 # First target is the help.
 help:
-	@echo "# "
+	@echo "#"
 	@echo "# SAMPLE=${SAMPLE}"
 	@echo "# FASTA=${FASTA}"
 	@echo "# R1=${R1}"
-	@echo "# COUNT=${COUNT}"
-	@echo "# "
-	@echo "# make data"
-	@echo "# make index"
-	@echo "# make align"
-	@echo "# make count"
-	@echo "# "
-	@echo "# make all"
-	@echo "# "
-
+	@echo "# COUNTS=${COUNTS}"
+	@echo "#"
+	@echo "# make data     (download and unpack the example data)"
+	@echo "# make index    (build the salmon index from the transcripts)"
+	@echo "# make counts   (quantify one sample: SAMPLE=${SAMPLE})"
+	@echo "# make batch    (quantify every sample in ${DESIGN})"
+	@echo "#"
 
 # Download and unpack the data
 ${FASTA} ${GTF} ${R1} &:
@@ -63,33 +76,29 @@ ${FASTA} ${GTF} ${R1} &:
 data: ${FASTA} ${GTF} ${R1}
 	ls -lh ${FASTA} ${GTF} ${R1}
 
-# The index file
+# Build the salmon index from the transcript fasta
 ${FASTA_IDX}: ${FASTA}
-	salmon index --transcripts ${FASTA} --index ${FASTA_IDX_DIR}
+	salmon index --transcripts ${FASTA} --index ${FASTA_IDX_DIR} --threads ${THREADS}
+	touch ${FASTA_IDX}
 
-# Index the genome.
 index: ${FASTA_IDX}
-	ls -lh ${FASTA_IDX}
+	ls -lh ${FASTA_IDX_DIR}
 
+# Quantify one sample against the transcripts
 ${COUNTS}: ${FASTA_IDX} ${R1}
-	mkdir -p $(dir ${COUNT_DIR})
-	salmon quant --index ${FASTA_IDX_DIR} --libType A -r ${R1} --output ${COUNT_DIR}
+	mkdir -p ${COUNT_DIR}
+	salmon quant --index ${FASTA_IDX_DIR} --libType A -r ${R1} --threads ${THREADS} --output ${COUNT_DIR}
 
 counts: ${COUNTS}
 	ls -lh ${COUNTS}
 
 all: counts
 
-# Generate all counts for every sample
-batch:
-	# Ensure that the index is built before running the alignments.
-	make index
-	
-	# Run the quantifications for each sample.
-	cat $(DESIGN) | $(PARALLEL) make SAMPLE={sample} all
-	
+# Quantify every sample listed in the design file
+batch: ${FASTA_IDX}
+	cat ${DESIGN} | ${PARALLEL} ${MAKE} -f ${MAKEFILE} SAMPLE={sample} counts
 
-.PHONY: all help download index align bam bw counts
+.PHONY: all help data index counts batch
 
 # Additional Makefile settings
 SHELL := bash
